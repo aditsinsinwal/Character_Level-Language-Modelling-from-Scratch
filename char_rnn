@@ -1,0 +1,135 @@
+import numpy as np
+
+def load_data(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        data = f.read()
+    chars = sorted(list(set(data)))
+    vocab_size = len(chars)
+    char_to_idx = {ch: i for i, ch in enumerate(chars)}
+    idx_to_char = {i: ch for i, ch in enumerate(chars)}
+    data_indices = np.array([char_to_idx[ch] for ch in data], dtype=np.int32)
+    return data, data_indices, char_to_idx, idx_to_char, vocab_size
+
+class CharRNN:
+    def __init__(self, vocab_size, hidden_size=100, seq_length=25, learning_rate=1e-1):
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.seq_length = seq_length
+        self.learning_rate = learning_rate
+
+        self.Wxh = np.random.randn(hidden_size, vocab_size) * 0.01
+        self.Whh = np.random.randn(hidden_size, hidden_size) * 0.01
+        self.Why = np.random.randn(vocab_size, hidden_size) * 0.01
+        self.bh = np.zeros((hidden_size, 1))
+        self.by = np.zeros((vocab_size, 1))
+
+    def loss_and_gradients(self, inputs, targets, h_prev):
+        xs, hs, ys, ps = {}, {}, {}, {}
+        hs[-1] = np.copy(h_prev)
+        loss = 0
+
+        for t in range(len(inputs)):
+            xs[t] = np.zeros((self.vocab_size, 1))
+            xs[t][inputs[t]] = 1
+            hs[t] = np.tanh(np.dot(self.Wxh, xs[t]) + np.dot(self.Whh, hs[t-1]) + self.bh)
+            ys[t] = np.dot(self.Why, hs[t]) + self.by
+            exp_scores = np.exp(ys[t] - np.max(ys[t]))
+            ps[t] = exp_scores / np.sum(exp_scores)
+            loss += -np.log(ps[t][targets[t], 0])
+
+        dWxh, dWhh, dWhy = np.zeros_like(self.Wxh), np.zeros_like(self.Whh), np.zeros_like(self.Why)
+        dbh, dby = np.zeros_like(self.bh), np.zeros_like(self.by)
+        dh_next = np.zeros_like(hs[0])
+
+        for t in reversed(range(len(inputs))):
+            dy = np.copy(ps[t])
+            dy[targets[t]] -= 1
+            dWhy += np.dot(dy, hs[t].T)
+            dby += dy
+            dh = np.dot(self.Why.T, dy) + dh_next
+            dh_raw = (1 - hs[t] * hs[t]) * dh
+            dbh += dh_raw
+            dWxh += np.dot(dh_raw, xs[t].T)
+            dWhh += np.dot(dh_raw, hs[t-1].T)
+            dh_next = np.dot(self.Whh.T, dh_raw)
+
+        for dparam in [dWxh, dWhh, dWhy, dbh, dby]:
+            np.clip(dparam, -5, 5, out=dparam)
+
+        grads = {'Wxh': dWxh, 'Whh': dWhh, 'Why': dWhy, 'bh': dbh, 'by': dby}
+        return loss, grads, hs[len(inputs) - 1]
+
+    def sample(self, h, seed_idx, n):
+        x = np.zeros((self.vocab_size, 1))
+        x[seed_idx] = 1
+        indices = []
+
+        for t in range(n):
+            h = np.tanh(np.dot(self.Wxh, x) + np.dot(self.Whh, h) + self.bh)
+            y = np.dot(self.Why, h) + self.by
+            exp_scores = np.exp(y - np.max(y))
+            p = exp_scores / np.sum(exp_scores)
+            idx = np.random.choice(range(self.vocab_size), p=p.ravel())
+            x = np.zeros((self.vocab_size, 1))
+            x[idx] = 1
+            indices.append(idx)
+
+        return indices
+
+    def update_parameters(self, grads):
+        for param, dparam in zip(
+            [self.Wxh, self.Whh, self.Why, self.bh, self.by],
+            [grads['Wxh'], grads['Whh'], grads['Why'], grads['bh'], grads['by']]
+        ):
+            param -= self.learning_rate * dparam
+
+def train_rnn(data_indices, char_to_idx, idx_to_char, vocab_size,
+              num_iters=10000, hidden_size=100, seq_length=25, learning_rate=1e-1):
+    rnn = CharRNN(vocab_size, hidden_size, seq_length, learning_rate)
+    n, p = 0, 0
+    smooth_loss = -np.log(1.0 / vocab_size) * seq_length
+    h_prev = np.zeros((hidden_size, 1))
+
+    while n < num_iters:
+        if p + seq_length + 1 >= len(data_indices) or n == 0:
+            h_prev = np.zeros((hidden_size, 1))
+            p = 0
+
+        inputs = data_indices[p:p + seq_length]
+        targets = data_indices[p + 1:p + seq_length + 1]
+
+        loss, grads, h_prev = rnn.loss_and_gradients(inputs, targets, h_prev)
+        smooth_loss = smooth_loss * 0.999 + loss * 0.001
+
+        if n % 100 == 0:
+            print(f"Iter {n}, loss: {smooth_loss:.4f}")
+            sample_idx = rnn.sample(h_prev, inputs[0], 200)
+            txt = ''.join(idx_to_char[i] for i in sample_idx)
+            print(f"----\n{txt}\n----")
+
+        rnn.update_parameters(grads)
+        p += seq_length
+        n += 1
+
+    return rnn
+
+if __name__ == "__main__":
+    data_path = "input.txt"
+    data, data_indices, char_to_idx, idx_to_char, vocab_size = load_data(data_path)
+
+    hidden_size = 128
+    seq_length = 50
+    learning_rate = 1e-1
+    num_iters = 5000
+
+    model = train_rnn(data_indices, char_to_idx, idx_to_char, vocab_size,
+                      num_iters=num_iters,
+                      hidden_size=hidden_size,
+                      seq_length=seq_length,
+                      learning_rate=learning_rate)
+
+    seed_char = data[0]
+    seed_idx = char_to_idx[seed_char]
+    sample_indices = model.sample(np.zeros((hidden_size, 1)), seed_idx, 500)
+    generated_text = ''.join(idx_to_char[i] for i in sample_indices)
+    print("Generated Text:\n", generated_text)
